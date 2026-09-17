@@ -20,6 +20,7 @@ st.latex(
     r"\mathrm{PSD} = K_{a,r} \cdot CF \cdot TAF \cdot F_{\theta} \cdot "
     r"\left(\frac{d_{IRP}}{d_{patient}}\right)^{2} \cdot BSF \cdot MEAC"
 )
+st.caption("📖 Apri la **Guida** dal menu a sinistra per la spiegazione dettagliata di algoritmo e formule, con figure.")
 
 uploaded = st.file_uploader("Drop the event-level Excel dose report (.xlsx)", type=["xlsx"])
 if uploaded is None:
