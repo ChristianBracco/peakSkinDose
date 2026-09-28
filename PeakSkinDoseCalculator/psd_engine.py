@@ -85,12 +85,20 @@ class Fallbacks:
 
 
 def _num(series: pd.Series) -> pd.Series:
+    """Coerce a column to numeric, robustly.
+
+    Handles Italian decimals (comma), placeholder tokens like '-' or '', and
+    already-numeric or mixed-type columns. Any value that cannot be parsed
+    becomes NaN instead of raising.
+    """
     if pd.api.types.is_numeric_dtype(series):
         return pd.to_numeric(series, errors="coerce")
-    return pd.to_numeric(
-        series.astype(str).str.strip().replace({"-": np.nan, "": np.nan}).str.replace(",", ".", regex=False),
-        errors="coerce",
-    )
+    # Work entirely on strings so the .str accessor is always valid.
+    s = series.astype(str).str.strip()
+    s = s.str.replace(",", ".", regex=False)
+    # Blank out placeholder / missing tokens.
+    s = s.mask(s.isin(["-", "", "--", "n/a", "N/A", "nan", "NaN", "None"]))
+    return pd.to_numeric(s, errors="coerce")
 
 
 def _resolve_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
@@ -244,7 +252,8 @@ def load_excel(source) -> Tuple[pd.DataFrame, Dict]:
 
     # Normalise numeric columns that exist.
     numeric_keys = ["dap", "kar", "alpha", "beta", "table_lat", "table_height",
-                    "table_lon", "sod", "sid", "coll_h", "coll_w", "kvp"]  # kvp for spectral corrections
+                    "table_lon", "sod", "sid", "coll_h", "coll_w", "kvp",
+                    "filter_min", "filter_max"]  # kvp/filter for spectral corrections
     for key in numeric_keys:
         c = cols.get(key)
         if c is not None:
@@ -416,8 +425,8 @@ def prepare_events(df: pd.DataFrame, cols: Dict[str, Optional[str]],
         # Optional event-specific added filtration. Some structured Excel exports
         # provide minimum/maximum filter thickness plus material; use their mean
         # thickness when available. Values are assumed to be in mm.
-        fmin = row.get(cols["filter_min"]) if cols.get("filter_min") else np.nan
-        fmax = row.get(cols["filter_max"]) if cols.get("filter_max") else np.nan
+        fmin = pd.to_numeric(row.get(cols["filter_min"]), errors="coerce") if cols.get("filter_min") else np.nan
+        fmax = pd.to_numeric(row.get(cols["filter_max"]), errors="coerce") if cols.get("filter_max") else np.nan
         fmat = str(row.get(cols["filter_material"], "")) if cols.get("filter_material") else ""
         vals = [float(v) for v in (fmin, fmax) if pd.notna(v)]
         fmean = float(sum(vals) / len(vals)) if vals else np.nan
