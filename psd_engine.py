@@ -43,6 +43,10 @@ COLUMN_ALIASES = {
     "fluoro_time": ["Tempo Totale di Fluoroscopia (min)", "Tempo Totale Fluoroscopia",
                     "Tempo Totale di Fluoroscopia (s)"],
     "patient": ["Paziente"],
+    "sex": ["Sesso"],
+    "birthdate": ["Data di Nascita"],
+    "height": ["Altezza Paziente"],
+    "weight": ["Peso Paziente"],
     "exam": ["Esame"],
     "exam_date": ["Data Esame"],
     "alpha": ["Angolazione primaria tubo (LL)"],
@@ -177,6 +181,61 @@ def _first_value(df: pd.DataFrame, col: Optional[str], numeric: bool = False):
     return str(s.iloc[0])
 
 
+def _format_date(value) -> Optional[str]:
+    """Normalise a date-like value to an ISO 'YYYY-MM-DD' string.
+
+    Accepts pandas Timestamps, datetimes, or parseable strings. Returns None for
+    None, NaT, empty, or otherwise unparseable input.
+    """
+    if value is None:
+        return None
+    ts = pd.to_datetime(value, errors="coerce")
+    if pd.isna(ts):
+        return None
+    return ts.strftime("%Y-%m-%d")
+
+
+def _patient_fields(df: pd.DataFrame, cols: Dict[str, Optional[str]]) -> Dict:
+    """Extract patient anagraphic fields from a report, shared by both branches.
+
+    Returns a dict with the seven anagraphic keys used across the app
+    (patient, sex, birthdate, exam, exam_date, height_cm, weight_kg). Dates are
+    ISO-normalised; height/weight are numeric (None when absent or a placeholder
+    like '-').
+    """
+    return {
+        "patient": _first_value(df, cols.get("patient")),
+        "sex": _first_value(df, cols.get("sex")),
+        "birthdate": _format_date(_first_value(df, cols.get("birthdate"))),
+        "exam": _first_value(df, cols.get("exam")),
+        "exam_date": _format_date(_first_value(df, cols.get("exam_date"))),
+        "height_cm": _first_value(df, cols.get("height"), numeric=True),
+        "weight_kg": _first_value(df, cols.get("weight"), numeric=True),
+    }
+
+
+def estimate_thorax_dimensions(weight_kg: float, height_cm: float) -> Tuple[float, float]:
+    """Estimate elliptic-cylinder torso dimensions (width_mm, ap_mm) from BMI.
+
+    This is a pragmatic linear fit of thorax width and antero-posterior (AP)
+    thickness against body-mass index, calibrated so that BMI ~ 25 maps to the
+    app's current defaults (width 360 mm, AP 240 mm). It is NOT a validated
+    clinical anthropometric model; it only provides a reasonable starting
+    phantom size. Outputs are clamped to the sidebar input ranges
+    (width 240-650 mm, AP 150-400 mm).
+
+    Returns the defaults (360.0, 240.0) when weight/height are missing or
+    non-positive.
+    """
+    if weight_kg is None or height_cm is None or weight_kg <= 0 or height_cm <= 0:
+        return (360.0, 240.0)
+    height_m = height_cm / 100.0
+    bmi = weight_kg / (height_m ** 2)
+    ap_mm = min(400.0, max(150.0, 100.0 + 5.6 * bmi))
+    width_mm = min(650.0, max(240.0, 180.0 + 7.2 * bmi))
+    return (width_mm, ap_mm)
+
+
 def _summarize_cumulative(df: pd.DataFrame, cols: Dict[str, Optional[str]]) -> Dict:
     """Build a summary dict for a cumulative/general (non-mappable) report."""
     kar_total = _first_value(df, cols.get("kar_total"), numeric=True)
@@ -193,9 +252,7 @@ def _summarize_cumulative(df: pd.DataFrame, cols: Dict[str, Optional[str]]) -> D
             "It has no per-event tube angles or table positions, so a spatial PSD "
             "map cannot be reconstructed. Use the matching '..._dettaglio' file for mapping."
         ),
-        "patient": _first_value(df, cols.get("patient")),
-        "exam": _first_value(df, cols.get("exam")),
-        "exam_date": _first_value(df, cols.get("exam_date")),
+        **_patient_fields(df, cols),
         "sum_kar_gy": kar_total if kar_total is not None else 0.0,
         "sum_dap_gy_cm2": dap_total if dap_total is not None else 0.0,
         "fluoro_time": fluoro,
@@ -205,6 +262,63 @@ def _summarize_cumulative(df: pd.DataFrame, cols: Dict[str, Optional[str]]) -> D
         "has_sid": False,
         "kar_source": cols.get("kar_total") or "",
     }
+
+
+def combine_summaries(detailed: Optional[Dict], cumulative: Optional[Dict]) -> Dict:
+    """Merge a detailed (event-level) and a cumulative (summary) summary dict.
+
+    Pure helper used by the dual-file intake. Returns ONE combined summary that
+    the mapping path, the size selector and the report consume. Never raises on
+    missing keys (uses ``.get`` throughout). If one argument is None the other
+    is returned (shallow-copied, with ``totals_source`` added); at least one
+    must be provided.
+
+    Base: the result starts from the DETAILED summary when present (so
+    ``mappable``/``columns``/``kind`` stay those of the mappable file), else
+    from the cumulative summary.
+
+    Merge rule:
+      * patient IDENTITY (patient, sex, birthdate, exam, exam_date): take the
+        DETAILED value when present and non-None, else the cumulative value.
+      * height_cm / weight_kg: take the CUMULATIVE value when present and
+        non-None, else the detailed value (the cumulative export is the
+        authoritative anthropometric summary).
+      * exam TOTALS (sum_kar_gy, sum_dap_gy_cm2, fluoro_time): prefer the
+        CUMULATIVE value when a cumulative summary is present and the value is
+        not None, else the detailed value.
+      * ``totals_source`` = 'cumulative' or 'detailed' records where the totals
+        were taken from.
+    """
+    if detailed is None and cumulative is None:
+        raise ValueError("combine_summaries requires at least one summary.")
+
+    base = detailed if detailed is not None else cumulative
+    combined = dict(base)
+
+    det = detailed or {}
+    cum = cumulative or {}
+
+    # Patient identity: detailed-first.
+    for key in ("patient", "sex", "birthdate", "exam", "exam_date"):
+        det_val = det.get(key)
+        combined[key] = det_val if det_val is not None else cum.get(key)
+
+    # Anthropometrics: cumulative-first.
+    for key in ("height_cm", "weight_kg"):
+        cum_val = cum.get(key)
+        combined[key] = cum_val if cum_val is not None else det.get(key)
+
+    # Exam totals: cumulative-first when a cumulative summary is present.
+    use_cumulative_totals = cumulative is not None
+    for key in ("sum_kar_gy", "sum_dap_gy_cm2", "fluoro_time"):
+        cum_val = cum.get(key)
+        if use_cumulative_totals and cum_val is not None:
+            combined[key] = cum_val
+        else:
+            combined[key] = det.get(key, cum.get(key))
+
+    combined["totals_source"] = "cumulative" if use_cumulative_totals else "detailed"
+    return combined
 
 
 def load_excel(source) -> Tuple[pd.DataFrame, Dict]:
@@ -303,6 +417,7 @@ def load_excel(source) -> Tuple[pd.DataFrame, Dict]:
         "has_sid": bool(cols.get("sid")),
         "kar_source": kar_used_col,
     }
+    summary.update(_patient_fields(df, cols))
     return df, summary
 
 
@@ -696,6 +811,46 @@ class GeometrySettings:
     offset_x_mm: float = 0.0
     offset_y_mm: float = 0.0
     offset_z_mm: float = 0.0
+    # Vertical anchoring of the elliptic-cylinder phantom:
+    #   "back_on_table"       -> (default) the patient's POSTERIOR surface (back)
+    #                            rests on a fixed table plane. Increasing the AP
+    #                            thickness grows the patient ANTERIORLY, so the
+    #                            back-to-source distance (hence the entrance-skin
+    #                            dose for from-below beams) does not change with
+    #                            patient size.
+    #   "center_on_isocentre" -> legacy behaviour: the phantom centre sits on the
+    #                            isocentre, so a thicker AP pushes the back toward
+    #                            the source and PSD rises artificially with size.
+    # Only applies to the cylinder phantom (the human mesh has no ap_mm ellipse).
+    anchor_mode: str = "back_on_table"
+    # Mattress/pad thickness (mm) between the table plane and the patient's back;
+    # added to the back-anchoring shift so the back sits above the table by the
+    # pad. Only relevant for anchor_mode == "back_on_table".
+    pad_mm: float = 0.0
+
+
+def _anchor_offset_y(geom: GeometrySettings, phantom_ap_mm: Optional[float]) -> float:
+    """Extra vertical offset applied to the phantom centre for back-on-table anchoring.
+
+    Returns 0.0 for the legacy ``center_on_isocentre`` mode (and whenever no
+    AP thickness is available, e.g. the human mesh phantom).
+
+    For ``back_on_table`` the whole phantom is shifted so its POSTERIOR surface
+    (the entrance surface for a from-below beam) lands on the table plane. In the
+    skin grid the posterior extreme of the ellipse is at the vertical extreme
+    ``ap_mm/2`` from the centre; the back sits at the extreme that faces the
+    source. The source for a 0/0 (PA) beam is on the side the vertical axis
+    points AWAY from, i.e. the sign is tied to ``geom.height_sign`` (not
+    hardcoded): with the default ``height_sign = -1`` this yields a negative
+    shift ``-(ap/2 + pad)``, moving the back down onto the table and letting AP
+    grow anteriorly. If ``height_sign`` flips, the shift flips with it.
+    """
+    if geom.anchor_mode != "back_on_table":
+        return 0.0
+    if phantom_ap_mm is None:
+        return 0.0
+    shift_mag = float(phantom_ap_mm) / 2.0 + float(geom.pad_mm)
+    return float(geom.height_sign) * shift_mag
 
 
 def _beam_axes(alpha_deg: float, beta_deg: float):
@@ -750,13 +905,17 @@ def make_skin_grid(phantom: Phantom):
 
 
 def _accumulate_dose(events: List[Dict], meta: Dict, corr: Corrections,
-                     geom: GeometrySettings, P: np.ndarray, N: np.ndarray):
+                     geom: GeometrySettings, P: np.ndarray, N: np.ndarray,
+                     phantom_ap_mm: Optional[float] = None):
     """Accumulate skin dose over an arbitrary set of skin cells (P, N).
 
-    Shared by the cylinder and anthropomorphic phantoms.
+    Shared by the cylinder and anthropomorphic phantoms. ``phantom_ap_mm`` is
+    the elliptic-cylinder AP thickness, used only for back-on-table anchoring
+    (None for the human mesh phantom -> no anchoring shift).
     """
     dose = np.zeros(P.shape[0], dtype=float)
     event_hits = 0
+    anchor_y = _anchor_offset_y(geom, phantom_ap_mm)
     for e in events:
         d, e1, e2 = _beam_axes(e["alpha"], e["beta"])
         beam_through_table = float(d[1]) > 0.0
@@ -769,7 +928,7 @@ def _accumulate_dose(events: List[Dict], meta: Dict, corr: Corrections,
         corr_product = bsf * meac * support * cf
         q = np.array([
             geom.lateral_sign * (e["lat"] - meta["ref_lat"]) + geom.offset_x_mm,
-            geom.height_sign * (e["height"] - meta["ref_height"]) + geom.offset_y_mm,
+            geom.height_sign * (e["height"] - meta["ref_height"]) + geom.offset_y_mm + anchor_y,
             geom.longitudinal_sign * (e["lon"] - meta["ref_lon"]) + geom.offset_z_mm,
         ], dtype=float)
         source = q - e["sod"] * d
@@ -796,7 +955,8 @@ def calculate_map(events: List[Dict], meta: Dict, phantom: Phantom, corr: Correc
         return _calculate_map_human(events, meta, phantom, corr, geom)
 
     theta, z, TH, Z, X, Y, P, N = make_skin_grid(phantom)
-    dose, event_hits = _accumulate_dose(events, meta, corr, geom, P, N)
+    dose, event_hits = _accumulate_dose(events, meta, corr, geom, P, N,
+                                        phantom_ap_mm=phantom.ap_mm)
 
     dose2d = dose.reshape(phantom.n_z, phantom.n_theta)
     peak_flat = int(np.argmax(dose))
@@ -855,6 +1015,10 @@ def event_contributions_at_peak(events: List[Dict], meta: Dict, phantom: Phantom
     n /= np.linalg.norm(n)
     out = []
 
+    # Same vertical back-on-table anchoring as _accumulate_dose: the peak point
+    # was located on the anchored phantom, so the geometry here must match.
+    anchor_y = _anchor_offset_y(geom, None if phantom.is_human else phantom.ap_mm)
+
     for e in events:
         d, e1, e2 = _beam_axes(e["alpha"], e["beta"])
         beam_through_table = float(d[1]) > 0.0
@@ -867,7 +1031,7 @@ def event_contributions_at_peak(events: List[Dict], meta: Dict, phantom: Phantom
         corr_product = bsf * meac * support * cf
         q = np.array([
             geom.lateral_sign * (e["lat"] - meta["ref_lat"]) + geom.offset_x_mm,
-            geom.height_sign * (e["height"] - meta["ref_height"]) + geom.offset_y_mm,
+            geom.height_sign * (e["height"] - meta["ref_height"]) + geom.offset_y_mm + anchor_y,
             geom.longitudinal_sign * (e["lon"] - meta["ref_lon"]) + geom.offset_z_mm,
         ], dtype=float)
         source = q - e["sod"] * d
@@ -879,11 +1043,19 @@ def event_contributions_at_peak(events: List[Dict], meta: Dict, phantom: Phantom
         v = float(V @ e2)
         scale = t / e["dref"]
         if abs(u) <= 0.5 * e["wref"] * scale and abs(v) <= 0.5 * e["href"] * scale:
-            dose = e["kar"] * (e["dref"] / t) ** 2 * corr_product * f_theta
+            # Inverse-square distance correction, computed geometrically:
+            #   SOD   = source -> isocentre distance (mm)
+            #   d_ref = source -> reference point (IRP) distance (mm) = SOD - offset
+            #   t     = d_patient = source -> this skin point (peak) distance (mm)
+            # The applied distance factor is (d_ref / t)^2.
+            inv_sq = (e["dref"] / t) ** 2
+            dose = e["kar"] * inv_sq * corr_product * f_theta
             out.append({
                 "Excel row": e["row"], "Dose at peak (Gy)": dose, "Ka,r (Gy)": e["kar"],
                 "Primary angle (deg)": e["alpha"], "Secondary angle (deg)": e["beta"],
                 "kVp": e.get("kvp"), "BSF": bsf, "MEAC": meac, "Table transm.": support,
+                "SOD (mm)": e["sod"], "d_ref (mm)": e["dref"],
+                "t = d_patient (mm)": t, "(d_ref/t)^2": inv_sq,
                 "Field source": e["field_src"], "Type": e["type"], "Protocol": e["protocol"],
             })
     return pd.DataFrame(out).sort_values("Dose at peak (Gy)", ascending=False) if out else pd.DataFrame()

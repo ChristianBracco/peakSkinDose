@@ -1,5 +1,8 @@
 from __future__ import annotations
 import io
+import html
+import re
+from datetime import datetime
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -17,10 +20,167 @@ def render_plotly(fig, height: int = 700):
     html = fig.to_html(include_plotlyjs="cdn", full_html=True, default_height=f"{height}px")
     components.html(html, height=height + 20, scrolling=False)
 
+
+def _fmt(v):
+    """Display helper: show an em-dash for missing/empty values."""
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return "\u2014"
+    return str(v)
+
+
+def build_html_report(patient: dict, size: dict, dose: dict,
+                      corr_summary: dict, contrib: "pd.DataFrame") -> str:
+    """Build a complete, self-contained HTML exam report as a string.
+
+    Pure function: depends only on the standard library (``html``,
+    ``datetime``) plus the ``to_html`` method of the supplied ``contrib``
+    DataFrame. No Streamlit, no new dependency. All patient-derived text is
+    passed through ``html.escape`` to avoid broken/injected markup, and any
+    ``None`` value is rendered as an em-dash ('\u2014').
+
+    This report is a research/commissioning prototype artefact and carries a
+    non-clinical disclaimer; it must NOT be used for clinical decisions.
+    """
+    DASH = "\u2014"
+
+    def esc(v):
+        """Escape a (possibly None) value for HTML text, None -> em-dash."""
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return DASH
+        return html.escape(str(v))
+
+    def num(v, fmt="{:.2f}", suffix=""):
+        """Format a numeric value, None -> em-dash. Non-numeric -> escaped str."""
+        if v is None:
+            return DASH
+        try:
+            return html.escape(fmt.format(float(v))) + suffix
+        except (TypeError, ValueError):
+            return esc(v)
+
+    patient = patient or {}
+    size = size or {}
+    dose = dose or {}
+    corr_summary = corr_summary or {}
+
+    generated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # (6) contrib table (first 100 rows) as HTML.
+    try:
+        table_html = contrib.head(100).to_html(index=False, border=0)
+    except Exception:
+        table_html = "<p>Nessun evento disponibile.</p>"
+
+    # (3) Patient size block.
+    size_rows = [
+        ("Modalità taglia", esc(size.get("mode"))),
+        ("Width laterale (mm)", num(size.get("width_mm"), "{:.0f}")),
+        ("AP (mm)", num(size.get("ap_mm"), "{:.0f}")),
+        ("Lunghezza mappata (mm)", num(size.get("length_mm"), "{:.0f}")),
+    ]
+    size_note = ""
+    if size.get("mode") == "Da peso + altezza":
+        size_rows += [
+            ("Peso (kg)", num(size.get("weight_kg"), "{:.1f}")),
+            ("Altezza (cm)", num(size.get("height_cm"), "{:.1f}")),
+            ("BMI", num(size.get("bmi"), "{:.1f}")),
+        ]
+        size_note = (
+            "<p class='note'>La stima antropometrica di width/AP è "
+            "approssimata e <strong>non clinica</strong>.</p>"
+        )
+
+    def kv_table(rows):
+        body = "".join(
+            f"<tr><th>{html.escape(k)}</th><td>{v}</td></tr>" for k, v in rows
+        )
+        return f"<table class='kv'>{body}</table>"
+
+    patient_rows = [
+        ("Paziente", esc(patient.get("patient"))),
+        ("Sesso", esc(patient.get("sex"))),
+        ("Data di nascita", esc(patient.get("birthdate"))),
+        ("Esame", esc(patient.get("exam"))),
+        ("Data esame", esc(patient.get("exam_date"))),
+    ]
+
+    # (4) Dose results.
+    dose_rows = [
+        ("PSD (Gy)", num(dose.get("psd_gy"))),
+    ]
+    if dose.get("kind") == "cylinder":
+        dose_rows += [
+            ("Angolo circonferenziale (°)", num(dose.get("theta_deg"), "{:.1f}")),
+            ("Posizione longitudinale (mm)", num(dose.get("z_mm"), "{:.0f}")),
+        ]
+    dose_rows += [
+        ("Eventi utilizzati", num(dose.get("used"), "{:.0f}")),
+        ("Ka,r totale (Gy)", num(dose.get("sum_kar_gy"), "{:.3f}")),
+        ("DAP totale (Gy·cm²)", num(dose.get("sum_dap_gy_cm2"), "{:.1f}")),
+    ]
+
+    # (5) Correction model.
+    if corr_summary.get("use_spectral"):
+        corr_model = "BSF/MEAC spettrali (Benmakhlouf 2011)"
+    else:
+        corr_model = "Costanti"
+    corr_rows = [
+        ("Modello correzione", esc(corr_model)),
+    ]
+    if corr_summary.get("use_spectral"):
+        corr_rows.append(("kVp sorgente", esc(corr_summary.get("kvp_source"))))
+    else:
+        corr_rows += [
+            ("BSF (costante)", num(corr_summary.get("bsf"), "{:.2f}")),
+            ("MEAC (costante)", num(corr_summary.get("meac"), "{:.2f}")),
+        ]
+    corr_rows += [
+        ("Attenuazione tavolo", esc(corr_summary.get("table_mode"))),
+        ("Offset punto di riferimento (mm)", num(corr_summary.get("ref_offset_mm"), "{:.0f}")),
+        ("SOD sorgente", esc(corr_summary.get("sod_source"))),
+    ]
+    if corr_summary.get("table_mode") == "measured":
+        corr_rows.append(("Trasmissione tavolo", num(corr_summary.get("table_transmission"), "{:.3f}")))
+    _anchor_mode = corr_summary.get("anchor_mode")
+    if _anchor_mode is not None:
+        _anchor_it = ("Schiena sul piano del tavolo" if _anchor_mode == "back_on_table"
+                      else "Centro sull'isocentro (legacy)")
+        corr_rows.append(("Ancoraggio paziente", esc(_anchor_it)))
+        if _anchor_mode == "back_on_table":
+            corr_rows.append(("Spessore materasso/pad (mm)",
+                              num(corr_summary.get("pad_mm"), "{:.0f}")))
+
+    return (
+        "<!DOCTYPE html>\n"
+        "<html lang='it'>\n<head>\n<meta charset='utf-8'>\n"
+        "<title>Report esame PSD</title>\n"
+        "<style>"
+        "body{font-family:Arial,Helvetica,sans-serif;margin:2em;color:#222;}"
+        "h1{font-size:1.6em;}h2{font-size:1.2em;margin-top:1.5em;border-bottom:1px solid #ccc;}"
+        "table{border-collapse:collapse;margin:0.5em 0;}"
+        "table.kv th{text-align:left;padding:2px 12px 2px 0;color:#555;}"
+        "table.kv td{padding:2px 0;}"
+        "table td,table th{padding:3px 8px;}"
+        ".disclaimer{color:#a00;font-weight:bold;}"
+        ".note{color:#666;font-style:italic;}"
+        ".timestamp{color:#666;}"
+        "</style>\n</head>\n<body>\n"
+        "<h1>Report esame — Peak Skin Dose</h1>\n"
+        f"<p class='timestamp'>Generato il {html.escape(generated)}</p>\n"
+        "<p class='disclaimer'>research/commissioning prototype — not for clinical use</p>\n"
+        "<h2>Paziente</h2>\n" + kv_table(patient_rows) + "\n"
+        "<h2>Taglia paziente</h2>\n" + kv_table(size_rows) + size_note + "\n"
+        "<h2>Risultati dose</h2>\n" + kv_table(dose_rows) + "\n"
+        "<h2>Modello di correzione</h2>\n" + kv_table(corr_rows) + "\n"
+        "<h2>Eventi che contribuiscono al punto PSD (primi 100)</h2>\n"
+        + table_html + "\n"
+        "</body>\n</html>\n"
+    )
+
 from psd_engine import (
     load_excel, field_consistency, prepare_events, Phantom, Corrections,
     GeometrySettings, Fallbacks, calculate_map, event_contributions_at_peak,
-    build_spectral_corrections,
+    build_spectral_corrections, estimate_thorax_dimensions, combine_summaries,
 )
 
 try:
@@ -40,39 +200,88 @@ st.latex(
 )
 st.caption("📖 Apri la **Guida** dal menu a sinistra per la spiegazione dettagliata di algoritmo e formule, con figure.")
 
-uploaded = st.file_uploader("Drop the event-level Excel dose report (.xlsx)", type=["xlsx"])
-if uploaded is None:
+uploaded_files = st.file_uploader(
+    "Carica il Dettaglio (event-level, per la mappa) e/o il Cumulativo (riepilogo/anagrafica) (.xlsx)",
+    type=["xlsx"],
+    accept_multiple_files=True,
+    help="Puoi caricare un solo file o entrambi. Il file di dettaglio (event-level) "
+         "serve a ricostruire la mappa; il cumulativo porta l'anagrafica e i totali "
+         "d'esame. La classificazione è automatica, in base al contenuto del file "
+         "(non al nome).",
+)
+if not uploaded_files:
     st.info(
         "Upload a **detailed** (event-level) Excel export — e.g. Coronarografia.xlsx, EVAR.xlsx, "
-        "PTCA.xlsx, Embolizzazione.xlsx. Cumulative/summary exports cannot be mapped."
+        "PTCA.xlsx, Embolizzazione.xlsx — and/or the matching **cumulative/summary** export. "
+        "Cumulative/summary exports carry anagraphic + exam totals but cannot be mapped on their own."
     )
     st.stop()
 
-try:
-    df, summary = load_excel(uploaded)
-except Exception as exc:
-    st.error(f"Cannot read this file: {exc}")
-    st.stop()
+# Classify each uploaded file by its PARSED summary['kind'] (NOT the filename).
+detailed_df = detailed_summary = None
+cumulative_df = cumulative_summary = None
+for uf in uploaded_files:
+    try:
+        f_df, f_summary = load_excel(uf)
+    except Exception as exc:
+        st.error(f"Cannot read '{getattr(uf, 'name', 'file')}': {exc}")
+        st.stop()
 
-cols = summary["columns"]
+    if f_summary.get("kind") == "detailed" or f_summary.get("mappable"):
+        if detailed_summary is not None:
+            st.warning(
+                f"Più di un file di dettaglio caricato — uso il primo e ignoro "
+                f"'{getattr(uf, 'name', 'file')}'."
+            )
+            continue
+        detailed_df, detailed_summary = f_df, f_summary
+    else:
+        if cumulative_summary is not None:
+            st.warning(
+                f"Più di un file cumulativo caricato — uso il primo e ignoro "
+                f"'{getattr(uf, 'name', 'file')}'."
+            )
+            continue
+        cumulative_df, cumulative_summary = f_df, f_summary
 
-# Cumulative/summary reports: no per-event geometry -> show totals, skip mapping.
-if not summary.get("mappable", True):
-    st.info(summary.get("message", "This is a cumulative/summary report and cannot be mapped."))
+# One combined summary feeds anagraphic, totals and the correction/report sections.
+combined = combine_summaries(detailed_summary, cumulative_summary)
+
+# Columns for prepare_events come from the mappable (detailed) file when present,
+# otherwise from the cumulative file.
+if detailed_summary is not None:
+    cols = detailed_summary["columns"]
+else:
+    cols = cumulative_summary["columns"]
+
+# Cumulative-only intake: no per-event geometry -> show totals, skip mapping.
+if detailed_summary is None:
+    summary = combined
+    st.info(cumulative_summary.get("message", "This is a cumulative/summary report and cannot be mapped."))
     st.subheader("Exam dose summary")
     m1, m2, m3 = st.columns(3)
     m1.metric("Total Ka,r", f"{summary['sum_kar_gy']:.3f} Gy")
     m2.metric("Total DAP", f"{summary['sum_dap_gy_cm2']:.1f} Gy·cm²")
     if summary.get("fluoro_time") is not None:
         m3.metric("Fluoroscopy time", f"{summary['fluoro_time']:.1f}")
-    details = {k: summary.get(k) for k in ("patient", "exam", "exam_date") if summary.get(k)}
-    if details:
-        st.write(details)
+    st.subheader("Paziente")
+    pc1, pc2, pc3, pc4, pc5 = st.columns(5)
+    pc1.metric("Nome", _fmt(summary.get("patient")))
+    pc2.metric("Sesso", _fmt(summary.get("sex")))
+    pc3.metric("Data di nascita", _fmt(summary.get("birthdate")))
+    pc4.metric("Esame", _fmt(summary.get("exam")))
+    pc5.metric("Data esame", _fmt(summary.get("exam_date")))
     st.caption(
         "To reconstruct a peak-skin-dose map, upload the matching event-level "
         "'..._dettaglio' export for this patient/procedure."
     )
     st.stop()
+
+# Detailed file present -> mapping path. Use the detailed df/columns for the map,
+# but read anagraphic + totals from the COMBINED summary (cumulative totals win
+# when a cumulative file was also uploaded).
+df = detailed_df
+summary = combined
 
 with st.sidebar:
     st.header("Patient phantom")
@@ -103,17 +312,86 @@ with st.sidebar:
     )
 
     if phantom_model == "cylinder":
-        width = st.number_input("Lateral width (mm)", 180.0, 700.0, 360.0, 5.0)
-        ap = st.number_input("AP thickness (mm)", 120.0, 600.0, 240.0, 5.0)
+        size_mode = st.selectbox(
+            "Taglia paziente",
+            ["Manuale", "Preset percentili", "Da peso + altezza"],
+            index=0,
+            help="Come impostare le dimensioni trasversali del cilindro ellittico "
+                 "(width laterale e AP) su cui viene proiettata la dose alla cute. "
+                 "'Manuale' è il comportamento di default. 'Preset percentili' usa "
+                 "approssimazioni di popolazione adulta toracica. 'Da peso + altezza' "
+                 "stima width/AP da un modello antropometrico (non clinico).",
+        )
+
+        # Default placeholders for the FEAT-003 size record.
+        weight = height = bmi = None
+
+        if size_mode == "Manuale":
+            width = st.number_input("Lateral width (mm)", 180.0, 700.0, 360.0, 5.0)
+            ap = st.number_input("AP thickness (mm)", 120.0, 600.0, 240.0, 5.0)
+        elif size_mode == "Preset percentili":
+            preset = st.selectbox("Percentile", ["Piccolo", "Medio", "Grande"], index=1)
+            pre_w, pre_ap = {
+                "Piccolo": (300.0, 200.0),
+                "Medio": (360.0, 240.0),
+                "Grande": (420.0, 280.0),
+            }[preset]
+            width = st.number_input("Lateral width (mm)", 180.0, 700.0, pre_w, 5.0)
+            ap = st.number_input("AP thickness (mm)", 120.0, 600.0, pre_ap, 5.0)
+            st.caption(
+                "ℹ️ Valori indicativi di popolazione adulta (torace), non specifici "
+                "del paziente. Modificabili sopra."
+            )
+        else:  # Da peso + altezza
+            w0 = summary.get("weight_kg")
+            h0 = summary.get("height_cm")
+            weight = st.number_input("Peso (kg)", 30.0, 250.0, float(w0) if w0 else 75.0, 1.0)
+            height = st.number_input("Altezza (cm)", 120.0, 220.0, float(h0) if h0 else 170.0, 1.0)
+            est_w, est_ap = estimate_thorax_dimensions(weight, height)
+            width = st.number_input("Lateral width (mm)", 180.0, 700.0, est_w, 5.0)
+            ap = st.number_input("AP thickness (mm)", 120.0, 600.0, est_ap, 5.0)
+            bmi = weight / (height / 100.0) ** 2
+            st.caption(
+                f"ℹ️ BMI ≈ **{bmi:.1f}**. Stima width/AP da modello antropometrico "
+                "approssimato e **non clinico**; valori modificabili sopra."
+            )
+
         length = st.number_input("Mapped longitudinal length (mm)", 300.0, 1800.0, 800.0, 25.0)
         resolution = st.selectbox("Map resolution", ["Fast", "Standard", "High"], index=1)
         res = {"Fast": (120, 160), "Standard": (180, 240), "High": (240, 320)}[resolution]
         human_scale = 1.0
+
+        anchor_label = st.selectbox(
+            "Ancoraggio paziente",
+            ["Schiena sul piano del tavolo", "Centro sull'isocentro (legacy)"],
+            index=0,
+            help="Come viene posizionato verticalmente il cilindro ellittico. "
+                 "'Schiena sul piano del tavolo' tiene la cute di entrata (la "
+                 "schiena) a una distanza fissa e realistica dalla sorgente: "
+                 "aumentando lo spessore AP il paziente cresce verso l'anteriore, "
+                 "quindi la PSD non aumenta artificialmente con la taglia. "
+                 "'Centro sull'isocentro (legacy)' riproduce il comportamento "
+                 "precedente (centro del fantoccio sull'isocentro).",
+        )
+        anchor_mode = {
+            "Schiena sul piano del tavolo": "back_on_table",
+            "Centro sull'isocentro (legacy)": "center_on_isocentre",
+        }[anchor_label]
+        pad_mm = st.number_input(
+            "Spessore materasso/pad (mm)", 0.0, 100.0, 0.0, 5.0,
+            help="Spessore del materasso/pad tra il piano del tavolo e la schiena "
+                 "del paziente. Rilevante solo con l'ancoraggio 'Schiena sul "
+                 "piano del tavolo'.",
+        )
     else:
         # Kept for when anthropomorphic phantoms are re-enabled.
+        size_mode = "Manuale"
+        weight = height = bmi = None
         human_scale = st.number_input("Body scale", 0.70, 1.40, 1.00, 0.01)
         width = ap = length = 0.0
         res = (180, 240)
+        anchor_mode = "back_on_table"
+        pad_mm = 0.0
 
     st.header("Dose corrections")
     st.caption("Commission these values for each X-ray system before clinical use.")
@@ -257,6 +535,17 @@ except Exception as exc:
 
 qc = field_consistency(df, cols, reference_offset_mm=ref_offset)
 
+# Record the chosen patient-size parameters for the downstream report (FEAT-003).
+size_detail = {
+    "mode": size_mode,
+    "width_mm": width,
+    "ap_mm": ap,
+    "length_mm": length,
+    "weight_kg": weight,
+    "height_cm": height,
+    "bmi": bmi,
+}
+
 phantom = Phantom(
     model=phantom_model,
     width_mm=width, ap_mm=ap, length_mm=length, n_theta=res[0], n_z=res[1],
@@ -273,6 +562,7 @@ corr = Corrections(
 geom = GeometrySettings(
     lateral_sign=lat_sign, height_sign=h_sign, longitudinal_sign=lon_sign,
     offset_x_mm=off_x, offset_y_mm=off_y, offset_z_mm=off_z,
+    anchor_mode=anchor_mode, pad_mm=pad_mm,
 )
 
 if meta["used"] == 0:
@@ -297,6 +587,14 @@ except Exception as exc:
 
 peak = result["peak"]
 
+st.subheader("Paziente")
+pc1, pc2, pc3, pc4, pc5 = st.columns(5)
+pc1.metric("Nome", _fmt(summary.get("patient")))
+pc2.metric("Sesso", _fmt(summary.get("sex")))
+pc3.metric("Data di nascita", _fmt(summary.get("birthdate")))
+pc4.metric("Esame", _fmt(summary.get("exam")))
+pc5.metric("Data esame", _fmt(summary.get("exam_date")))
+
 st.header("🎯 Peak skin dose")
 p1, p2, p3, p4 = st.columns([1.4, 1, 1, 1])
 p1.metric("PSD", f"{peak['psd_gy']:.2f} Gy")
@@ -316,9 +614,13 @@ else:
     p4.metric("Correction product", f"{corr.product:.3f}")
 
 # Quick context line so the essentials sit together at the top.
+_totals_src = (
+    " (totali dal cumulativo)" if summary.get("totals_source") == "cumulative"
+    else ""
+)
 st.caption(
     f"From **{meta['used']}** irradiation events · total Ka,r **{summary['sum_kar_gy']:.2f} Gy** · "
-    f"total DAP **{summary['sum_dap_gy_cm2']:.0f} Gy·cm²**. "
+    f"total DAP **{summary['sum_dap_gy_cm2']:.0f} Gy·cm²**{_totals_src}. "
     "Map coordinates are relative to the phantom/reference table position; "
     "absolute anatomical location cannot be inferred from this Excel alone."
 )
@@ -407,8 +709,65 @@ else:
     csv = contrib.to_csv(index=False).encode("utf-8")
     st.download_button("Download PSD-point event contributions (CSV)", csv, "psd_event_contributions.csv", "text/csv")
 
+    # ---- Self-contained HTML exam report (FEAT-003) --------------------
+    _report_patient = {
+        "patient": summary.get("patient"),
+        "sex": summary.get("sex"),
+        "birthdate": summary.get("birthdate"),
+        "exam": summary.get("exam"),
+        "exam_date": summary.get("exam_date"),
+    }
+    _report_dose = {
+        "kind": result["kind"],
+        "psd_gy": peak.get("psd_gy"),
+        "theta_deg": peak.get("theta_deg"),
+        "z_mm": peak.get("z_mm"),
+        "used": meta["used"],
+        "sum_kar_gy": summary.get("sum_kar_gy"),
+        "sum_dap_gy_cm2": summary.get("sum_dap_gy_cm2"),
+    }
+    _report_corr = {
+        "use_spectral": bool(spectral is not None),
+        "kvp_source": ("per-event kVp" if cols.get("kvp")
+                       else (f"default {spectral_cfg.default_kvp:.0f} kVp"
+                             if spectral is not None else None)),
+        "bsf": bsf,
+        "meac": tissue_f,
+        "table_mode": table_mode,
+        "table_transmission": support,
+        "ref_offset_mm": ref_offset,
+        "sod_source": f"default {default_sod:.0f} mm",
+        "anchor_mode": anchor_mode,
+        "pad_mm": pad_mm,
+    }
+    # Filesystem-safe slug from accession/patient name, fallback 'esame'.
+    _stem_src = summary.get("patient") or "esame"
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", str(_stem_src)).strip("_") or "esame"
+    st.download_button(
+        "Scarica report esame (HTML)",
+        data=build_html_report(_report_patient, size_detail, _report_dose,
+                               _report_corr, contrib).encode("utf-8"),
+        file_name=f"PSD_report_{stem}.html",
+        mime="text/html",
+    )
+
 st.divider()
 st.subheader("Imported data & correction settings used")
+
+# Patient-size mode and resulting phantom cross-section used for this map.
+_size_line = (
+    f"Taglia paziente: **{size_detail['mode']}** · "
+    f"width {size_detail['width_mm']:.0f} mm · AP {size_detail['ap_mm']:.0f} mm · "
+    f"length {size_detail['length_mm']:.0f} mm"
+)
+if size_detail["bmi"] is not None:
+    _size_line += f" · BMI {size_detail['bmi']:.1f}"
+_anchor_label_it = ("schiena sul piano del tavolo" if geom.anchor_mode == "back_on_table"
+                    else "centro sull'isocentro (legacy)")
+_size_line += f" · ancoraggio {_anchor_label_it}"
+if geom.anchor_mode == "back_on_table" and geom.pad_mm:
+    _size_line += f" · pad {geom.pad_mm:.0f} mm"
+st.caption(_size_line + ".")
 
 # What correction model was applied.
 if spectral is not None:

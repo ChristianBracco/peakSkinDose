@@ -68,7 +68,7 @@ def fig_reference_frame():
     ax.text(15, -140, "fascio", color="#1f77b4", fontsize=9)
     ax.text(-290, 200, "z (longitudinale)\nentra nel piano", fontsize=8, style="italic")
     ax.set_title("Sistema di riferimento e paziente supino")
-    ax.set_aspect("equal"); ax.set_xlim(-330, 360); ax.set_ylim(-300, 300)
+    ax.set_aspect("equal"); ax.set_xlim(-330, 470); ax.set_ylim(-300, 310)
     ax.set_xticks([]); ax.set_yticks([])
     fig.tight_layout()
     return fig
@@ -117,7 +117,7 @@ def _source_axes(alpha, beta, lat=0.0, height=0.0, lon=0.0):
 
 def fig_pyramid():
     """La piramide a 4 lati: apice nel fuoco, base al piano IRP."""
-    fig = plt.figure(figsize=(4.8, 4.0))
+    fig = plt.figure(figsize=(5.6, 4.2))
     ax = fig.add_subplot(111, projection="3d")
     source, d, e1, e2 = _source_axes(20.0, 15.0)
     center = source + DREF * d
@@ -140,7 +140,8 @@ def fig_pyramid():
     ax.text(center[0], center[1], center[2], "  base @ IRP\n  (w_rif × h_rif)", fontsize=9)
     ax.scatter(0, 0, 0, color="g", marker="+", s=90)
     ax.text(0, 0, 0, " isocentro", fontsize=8)
-    ax.set_title("Piramide del fascio: apice = fuoco, base al piano di riferimento")
+    ax.set_title("Piramide del fascio:\napice = fuoco, base al piano di riferimento",
+                 fontsize=10)
     ax.set_xlabel("x"); ax.set_ylabel("y"); ax.set_zlabel("z")
     ax.view_init(elev=16, azim=-70)
     fig.tight_layout()
@@ -149,7 +150,7 @@ def fig_pyramid():
 
 def fig_inverse_square():
     """La correzione 1/d^2 tra IRP e pelle."""
-    fig, ax = plt.subplots(figsize=(5.6, 3.4))
+    fig, ax = plt.subplots(figsize=(6.4, 3.6))
     d = np.linspace(200, 900, 300)
     ax.plot(d, (DREF / d) ** 2, color="#1f77b4", lw=2)
     ax.axvline(DREF, color="0.5", ls="--")
@@ -162,7 +163,8 @@ def fig_inverse_square():
     ax.text(700, 0.45, "pelle più lontana →\ndose < Ka,r", color="navy", fontsize=8)
     ax.set_xlabel("distanza fuoco–pelle  d  (mm)")
     ax.set_ylabel("fattore  (d_IRP / d)²")
-    ax.set_title("Correzione inverse-square dal punto di riferimento alla pelle")
+    ax.set_title("Correzione inverse-square dal punto di riferimento alla pelle",
+                 fontsize=11)
     ax.set_ylim(0, 3.2)
     fig.tight_layout()
     return fig
@@ -315,8 +317,8 @@ def fig_beam_coordinates():
 
     ax.set_title("Coordinate del punto nel riferimento del fascio (piano d–e₁)",
                  fontsize=11)
-    ax.set_xlim(-1.4, tmax + 2.6)
-    ax.set_ylim(-2.2, 2.3)
+    ax.set_xlim(-1.8, tmax + 4.0)
+    ax.set_ylim(-2.4, 2.4)
     ax.set_aspect("equal")
     ax.axis("off")
     fig.tight_layout()
@@ -326,7 +328,7 @@ def fig_beam_coordinates():
 def fig_inside_test():
     """Sezione trasversale del fascio a profondita' t: il rettangolo w×h e
     quali punti stanno dentro/fuori (coordinate u, v)."""
-    fig, ax = plt.subplots(figsize=(4.6, 4.0))
+    fig, ax = plt.subplots(figsize=(5.2, 4.2))
     hw, hh = 1.0, 0.75  # semi-larghezza/semi-altezza alla profondita' t
     from matplotlib.patches import Rectangle
     ax.add_patch(Rectangle((-hw, -hh), 2 * hw, 2 * hh, fill=True,
@@ -347,8 +349,10 @@ def fig_inside_test():
     ax.text(hw + 0.3, 0, "$h_{rif}\\,t/d_{IRP}$", color="#d62728", va="center", fontsize=10, rotation=90)
     ax.set_xlabel("$u$  (asse $\\mathbf{e}_1$, larghezza)")
     ax.set_ylabel("$v$  (asse $\\mathbf{e}_2$, altezza)")
-    ax.set_title("Sezione del fascio a profondità t:\nun punto è nel campo se |u| e |v| stanno nel rettangolo")
-    ax.set_xlim(-1.9, 2.1); ax.set_ylim(-1.6, 1.4)
+    ax.set_title("Sezione del fascio a profondità t:\n"
+                 "un punto è nel campo se |u| e |v|\nstanno nel rettangolo",
+                 fontsize=10)
+    ax.set_xlim(-1.9, 2.1); ax.set_ylim(-1.7, 1.6)
     ax.set_aspect("equal")
     ax.legend(loc="upper left", fontsize=8)
     fig.tight_layout()
@@ -383,4 +387,201 @@ def fig_surface_normal():
     ax.set_aspect("equal"); ax.set_xlim(-360, 360); ax.set_ylim(-300, 320)
     ax.set_xticks([]); ax.set_yticks([])
     fig.tight_layout()
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Figure sulle DISTANZE della correzione inverse-square, con la geometria
+# ANCORATA ALLA SCHIENA sul piano del tavolo (default "back_on_table").
+# Mostrano SOD, d_ref e t, e perche' aumentare lo spessore del paziente non
+# avvicina piu' la schiena alla sorgente.
+# ---------------------------------------------------------------------------
+def fig_distances_anchored():
+    """Distanze sorgente→IRP→pelle con la schiena appoggiata sul tavolo.
+
+    Proiezione frontale standard (0°/0°): tubo SOTTO il paziente supino, fascio
+    verso l'alto (+y). Mostra sorgente, IRP, isocentro, piano del lettino e il
+    paziente (sezione ellittica) a DIMENSIONI UMANE leggibili.
+
+    Per rendere il paziente visibile nonostante la grande distanza fuoco-isocentro
+    (~720 mm) rispetto allo spessore del corpo (~240 mm), l'asse verticale ha una
+    INTERRUZIONE DI SCALA (axis break): il tratto fuoco→vicino-al-corpo, privo di
+    dettaglio, è compresso; il tratto del paziente è in scala reale. I valori
+    numerici nelle etichette restano quelli veri.
+    """
+    from matplotlib.patches import Rectangle, Ellipse
+    offset_irp = 150.0
+    y_irp = SOD - offset_irp      # d_ref dal fuoco (570 mm)
+    y_iso = SOD                   # isocentro (720 mm)
+    ap = 2 * B                    # spessore AP (240 mm)
+    width = 2 * A                 # larghezza laterale (360 mm)
+    y_table = y_irp - 70.0        # piano del lettino (500 mm dal fuoco)
+    y_back = y_table              # schiena = piano tavolo
+    y_center = y_back + ap / 2.0  # centro ellisse spostato di +AP/2
+    y_front = y_back + ap         # torace anteriore
+    t_back = y_back               # distanza fuoco→schiena
+
+    # Due pannelli con interruzione di scala condivisa: in basso la zona fuoco
+    # (compressa), in alto la zona paziente in scala reale. Altezze relative
+    # scelte per dare al corpo un aspetto "umano" ben proporzionato.
+    fig, (ax_top, ax_bot) = plt.subplots(
+        2, 1, figsize=(6.6, 7.4), sharex=True,
+        gridspec_kw=dict(height_ratios=[3.0, 1.0], hspace=0.06),
+    )
+    # Margini espliciti: lasciano spazio sopra per il titolo e sotto per il
+    # riquadro esplicativo, ed evitano che le etichette ai bordi vengano tagliate.
+    fig.subplots_adjust(left=0.06, right=0.97, top=0.90, bottom=0.17)
+    # finestre verticali (mm)
+    bot_lo, bot_hi = -30.0, 180.0                  # zona fuoco (compressa)
+    top_lo, top_hi = y_table - 60.0, y_iso + 260.0 # zona paziente (scala reale)
+
+    for ax in (ax_top, ax_bot):
+        ax.set_xlim(-300, 360)
+        ax.axvline(0, color="#ffe08a", lw=14, alpha=0.5, zorder=0)  # fascio schematico
+        ax.set_xticks([])
+
+    # --- pannello superiore: paziente, tavolo, IRP, isocentro (scala reale) ---
+    ax_top.set_ylim(top_lo, top_hi)
+    ax_top.add_patch(Rectangle((-200, y_table - 22), 400, 18,
+                               color="#9aa0a6", alpha=0.9, zorder=2))
+    ax_top.text(210, y_table - 13, "piano del lettino", va="center",
+                fontsize=9, color="#5f6368")
+    ax_top.add_patch(Ellipse((0, y_center), width=width, height=ap,
+                             facecolor="#ffd9c0", edgecolor="#d98b5f", lw=2,
+                             alpha=0.9, zorder=3))
+    ax_top.text(A + 15, y_center, "paziente\n(sezione\nellittica)", va="center",
+                fontsize=9, color="#b5651d")
+    ax_top.plot([0], [y_back], "o", color="#c1121f", ms=11, zorder=5)
+    ax_top.annotate("pelle d'ingresso (schiena)\n= punto di dose massima",
+                    (0, y_back), xytext=(-250, y_back + ap * 0.9), fontsize=9,
+                    color="#c1121f", arrowprops=dict(arrowstyle="->", color="#c1121f"))
+    ax_top.plot([0], [y_irp], "s", color="#2a9d8f", ms=9, zorder=6)
+    ax_top.text(18, y_irp, "IRP — qui è dichiarato Ka,r", va="center",
+                fontsize=9, color="#2a9d8f")
+    ax_top.plot([0], [y_iso], "s", color="#3a0ca3", ms=9, zorder=6)
+    ax_top.text(18, y_iso, "isocentro", va="center", fontsize=9, color="#3a0ca3")
+
+    # --- pannello inferiore: la sorgente (zona compressa) ---
+    ax_bot.set_ylim(bot_lo, bot_hi)
+    ax_bot.plot([0], [0], "*", color="#1d3557", ms=22, zorder=6)
+    ax_bot.text(18, 0, "sorgente (fuoco)", va="center", fontsize=9, color="#1d3557")
+
+    # --- segni di rottura scala tra i due pannelli ---
+    d = 0.012
+    kw = dict(transform=ax_top.transAxes, color="k", clip_on=False, lw=1)
+    ax_top.plot((-d, +d), (-d, +d), **kw); ax_top.plot((1 - d, 1 + d), (-d, +d), **kw)
+    kw = dict(transform=ax_bot.transAxes, color="k", clip_on=False, lw=1)
+    ax_bot.plot((-d, +d), (1 - 3 * d, 1 + 3 * d), **kw)
+    ax_bot.plot((1 - d, 1 + d), (1 - 3 * d, 1 + 3 * d), **kw)
+
+    # --- quote delle distanze (etichette coi valori reali) ---
+    # Le quote principali stanno nel pannello superiore (dove c'è il corpo);
+    # indichiamo che partono dal fuoco con una freccia verso il basso + testo.
+    # Frecce-quota (solo linee): indicano visivamente le tre distanze, tutte
+    # misurate dal fuoco. I valori numerici sono riportati nel riquadro-legenda
+    # qui sotto, cosi' le etichette non si accavallano ne' vengono tagliate.
+    def dist_arrow(x, y2, color, y1=None):
+        y1 = top_lo + 4 if y1 is None else y1
+        ax_top.annotate("", xy=(x, y2), xytext=(x, y1),
+                        arrowprops=dict(arrowstyle="-|>", color=color, lw=2))
+
+    dist_arrow(-200, y_iso, "#3a0ca3")   # SOD
+    dist_arrow(-150, y_irp, "#2a9d8f")   # d_ref
+    dist_arrow(-100, y_back, "#c1121f")  # t
+
+    # legenda delle distanze (valori reali): proxy-handle colorati, riquadro
+    # ancorato in alto a sinistra del pannello, dove c'e' spazio libero.
+    from matplotlib.lines import Line2D
+    handles = [
+        Line2D([0], [0], color="#3a0ca3", lw=2.5,
+               label=f"SOD = {SOD:.0f} mm (dal fuoco)"),
+        Line2D([0], [0], color="#2a9d8f", lw=2.5,
+               label=f"d_ref = SOD − {offset_irp:.0f} = {y_irp:.0f} mm"),
+        Line2D([0], [0], color="#c1121f", lw=2.5,
+               label=f"t (fuoco→schiena) = {t_back:.0f} mm"),
+    ]
+    ax_top.legend(handles=handles, loc="upper left", fontsize=8.5,
+                  framealpha=0.92, borderpad=0.6,
+                  title="Distanze (dal fuoco)", title_fontsize=9)
+
+    # formula della correzione: in alto a destra, sotto il titolo, cosi' non
+    # si sovrappone alla legenda delle distanze (in alto a sinistra).
+    ax_top.text(0.98, 0.985,
+                r"$D = K_{a,r}\left(\dfrac{d_{ref}}{t}\right)^{2}BSF\cdot MEAC\cdot TAF\cdot CF$",
+                transform=ax_top.transAxes, ha="right", va="top", fontsize=10.5,
+                bbox=dict(boxstyle="round,pad=0.35", fc="#f1f3f4", ec="#bbb"))
+
+    # riquadro esplicativo: come testo della figura nel margine inferiore riservato
+    fig.text(0.5, 0.015,
+             "Ancoraggio SCHIENA sul tavolo: la schiena poggia sul piano del lettino;\n"
+             "aumentare lo spessore AP alza il TORACE, non la schiena → t invariata\n"
+             "→ la PSD non cresce artificialmente con la taglia del paziente.",
+             ha="center", va="bottom", fontsize=8,
+             bbox=dict(boxstyle="round,pad=0.35", fc="#eef7f5", ec="#89c2bb"))
+
+    for ax in (ax_top, ax_bot):
+        ax.set_yticks([])
+        for s in ("top", "right", "left"):
+            ax.spines[s].set_visible(False)
+    ax_top.spines["bottom"].set_visible(False)
+    ax_bot.spines["bottom"].set_visible(False)
+    ax_top.set_title("Distanze della correzione inverse-square\n"
+                     "(schiena ancorata al tavolo; asse verticale con rottura di scala)",
+                     fontsize=11.5, pad=10)
+    return fig
+
+
+def fig_anchor_comparison():
+    """Confronto ancoraggio CENTRO-isocentro vs SCHIENA-tavolo al variare dell'AP.
+
+    Mostra due pazienti (AP sottile e spesso) con i due ancoraggi, evidenziando
+    come cambia (o non cambia) la distanza fuoco→schiena e quindi la dose.
+    """
+    from matplotlib.patches import Ellipse
+    fig, (axL, axR) = plt.subplots(1, 2, figsize=(9.2, 5.6), sharey=True)
+    y_src = -SOD                 # sorgente sotto (schema con isocentro a y=0)
+    ap_small, ap_big = 200.0, 360.0
+
+    def panel(ax, title, mode):
+        ax.set_title(title, fontsize=10.5)
+        ax.plot(0, y_src, marker="*", color="#1d3557", ms=18, zorder=6)
+        ax.text(20, y_src, "sorgente", va="center", fontsize=8, color="#1d3557")
+        ax.plot(0, 0, "k+", ms=11, zorder=6)
+        ax.text(14, 10, "isocentro", fontsize=8)
+        ax.axhline(0, color="0.85", ls=":", lw=0.8)
+        # scostamento verticale delle etichette per evitare sovrapposizioni
+        # (in modalita' "back" le due schiene coincidono sul piano del tavolo)
+        label_dy = {"center": {ap_small: 0.0, ap_big: 0.0},
+                    "back": {ap_small: 30.0, ap_big: -30.0}}[mode]
+        for ap, col, lab in [(ap_small, "#1f77b4", "AP sottile"),
+                             (ap_big, "#ff7f0e", "AP spesso")]:
+            if mode == "center":
+                y_center = 0.0
+            else:  # back on a fixed table plane
+                y_table = -140.0
+                y_center = y_table + ap / 2.0
+                if ap == ap_small:
+                    ax.axhline(y_table, color="#2ca02c", lw=2.5, zorder=1)
+                    ax.text(A + 10, y_table - 16, "piano\ndel lettino",
+                            color="#2ca02c", fontsize=8, ha="left", va="top")
+            ax.add_patch(Ellipse((0, y_center), 2 * A, ap, facecolor=col, alpha=0.28,
+                                 edgecolor=col, lw=1.6, zorder=3))
+            y_back = y_center - ap / 2.0
+            t_back = y_back - y_src
+            ax.plot([0], [y_back], "v", color=col, ms=9, zorder=5)
+            ax.annotate("", xy=(0, y_back), xytext=(0, y_src),
+                        arrowprops=dict(arrowstyle="->", color=col, lw=1.2, alpha=0.7))
+            ax.text(-A - 20, y_back + label_dy[ap], f"{lab}\nt≈{t_back:.0f}", color=col,
+                    fontsize=8, ha="right", va="center")
+        ax.set_aspect("equal")
+        ax.set_xlim(-A - 175, A + 95)
+        ax.set_xticks([])
+
+    panel(axL, "CENTRO sull'isocentro (legacy):\nAP spesso → schiena più vicina → dose ↑", "center")
+    panel(axR, "SCHIENA sul tavolo (default):\nAP spesso cresce verso l'alto → t invariata", "back")
+    axL.set_ylim(y_src - 50, 280)
+    axL.set_ylabel("y verticale (mm) — sorgente in basso")
+    fig.suptitle("Perché la taglia del paziente non deve gonfiare la PSD",
+                 fontsize=12, y=0.995)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
     return fig
